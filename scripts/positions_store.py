@@ -2,14 +2,16 @@
 positions_store.py — 私密持倉資料層
 ------------------------------------------------------------
 真實成本/股數不寫死在各支 xxx_levels.py 裡，一律從這裡讀。
-資料實際存在一個「私有 GitHub Gist」，不是這個 repo 本身——即使這個 repo(程式碼/判斷規則)
-意外外洩，也不會連帶洩漏真實金額。
 
-本機/雲端共用同一組介面，差別只在密鑰來源：
-  GH_TOKEN  — GitHub personal access token(需要 gist 讀寫權限)
-  GIST_ID   — 存資料的私有 gist id
-本機從環境變數(.env，已在 .gitignore 排除)讀；部署到 Streamlit Cloud 時從 st.secrets 讀。
-找不到密鑰、或 API 打不通時，一律安全降級成「空手」(cost=0, shares=0)，不會讓整份報表爆掉。
+兩種儲存模式，自動判斷用哪一種：
+  1. 本機模式(預設，不用設定任何東西)：存在同資料夾一個 positions_local.json，
+     已在 .gitignore 排除，不會被 commit、不會外流。這是給「在自己電腦跑、
+     手機連同一個 WiFi 打開」這種最簡單用法的。
+  2. 雲端模式(選用，之後想部署到 Streamlit Cloud 才需要)：設定 GH_TOKEN/GIST_ID
+     後，改存在一個私有 GitHub Gist，本機從環境變數讀，雲端從 st.secrets 讀。
+     即使這個 repo(程式碼/判斷規則)意外外洩，也不會連帶洩漏真實金額。
+
+找不到資料、或 API 打不通時，一律安全降級成「空手」(cost=0, shares=0)，不會讓整份報表爆掉。
 """
 import os
 import json
@@ -21,6 +23,7 @@ _CACHE_TS = 0
 _CACHE_TTL = 30  # 秒；同一次執行(levels_watch 跑 31 檔)只打一次 API，避免每檔各打一次
 
 FILENAME = "positions.json"
+_LOCAL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "positions_local.json")
 
 
 def _creds():
@@ -40,13 +43,26 @@ def _headers(token):
     return {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
 
 
+def _load_local():
+    try:
+        with open(_LOCAL_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_local(data):
+    with open(_LOCAL_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
 def _load(force=False):
     global _CACHE, _CACHE_TS
     if _CACHE is not None and not force and (time.time() - _CACHE_TS) < _CACHE_TTL:
         return _CACHE
     token, gist_id = _creds()
     if not token or not gist_id:
-        _CACHE = _CACHE or {}
+        _CACHE = _load_local()
         _CACHE_TS = time.time()
         return _CACHE
     try:
@@ -64,7 +80,10 @@ def _save(data):
     global _CACHE, _CACHE_TS
     token, gist_id = _creds()
     if not token or not gist_id:
-        raise RuntimeError("缺少 GH_TOKEN/GIST_ID，無法寫入持倉資料（本機請設定 .env，雲端請設定 Streamlit secrets）")
+        _save_local(data)
+        _CACHE = data
+        _CACHE_TS = time.time()
+        return
     r = requests.patch(
         f"https://api.github.com/gists/{gist_id}",
         headers=_headers(token),
