@@ -1,7 +1,7 @@
 """
 setup_github.py — 一次性建立「levels-app」私有 repo 與存放持倉資料的私有 Gist。
 ------------------------------------------------------------
-在你自己的電腦執行，Token 用 getpass 輸入(畫面不顯示、不會存檔、不會被貼進對話)：
+在你自己的電腦執行(token 會直接顯示在畫面上，只有你自己看得到，不會存檔、不會被貼進對話)：
   1. 到 https://github.com/settings/tokens/new 建一個 classic personal access token
      (fine-grained token 目前大多不支援 Gist 權限，這裡建議用 classic 的比較不會踩雷)，
      勾選兩個 scope：repo、gist，設好期限後產生，複製那串 token(只會顯示一次)。
@@ -10,12 +10,11 @@ setup_github.py — 一次性建立「levels-app」私有 repo 與存放持倉�
        - 新建立的私有 repo 網址(等等要把這個資料夾 push 過去)
        - 新建立的私有 Gist ID(要貼進 Streamlit Cloud 的 secrets 當 GIST_ID)
 """
-import getpass
 import requests
 
 
 def main():
-    token = getpass.getpass("貼上你的 GitHub personal access token（畫面不顯示）：")
+    token = input("貼上你的 GitHub personal access token：").strip()
     headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
 
     repo_name = input("新 repo 名稱（預設 levels-app）：").strip() or "levels-app"
