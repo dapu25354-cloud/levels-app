@@ -130,7 +130,25 @@ with tab3:
             st.success(f"已更新：成本 {new_cost}　股數 {new_shares}")
             _collect.clear()
 
-    hist = positions_store.trade_history(symbol)
-    if hist:
+    records = positions_store.trade_history_records(symbol)
+    if records:
         st.caption("這檔的交易紀錄：")
-        st.table(hist)
+        st.table(positions_store.trade_history(symbol))
+        st.caption("要取消哪一筆，就按該筆右側的「撤銷這筆」：")
+        for item in reversed(records):
+            action_text = "買進" if item.get("action") == "buy" else "賣出"
+            col1, col2 = st.columns([5, 2])
+            with col1:
+                st.write(
+                    f"{item.get('date', '')}｜{item.get('label', 'default')}｜"
+                    f"{action_text} {item.get('shares', 0)} 股 @ {item.get('price', 0)}"
+                )
+            with col2:
+                if st.button("撤銷這筆", key=f"undo_trade_{item['_index']}"):
+                    try:
+                        positions_store.undo_trade(item["_index"])
+                        st.success("已撤銷指定交易，成本與股數已重新計算。")
+                        _collect.clear()
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))

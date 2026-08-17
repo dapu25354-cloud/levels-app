@@ -132,14 +132,139 @@ def record_trade(symbol, label, action, shares, price, date, note="", name=""):
     history.append({
         "date": date, "symbol": symbol, "name": name, "label": label,
         "action": action, "shares": shares, "price": price, "note": note,
+        "before_cost": cur_cost, "before_shares": cur_shares,
     })
     _save(data)
     return new_cost, new_shares
 
 
-def trade_history(symbol=None):
+def undo_last_trade(symbol, label="default"):
+    """撤銷指定股票/倉別最後一筆交易，並恢復交易前的成本與股數。"""
+    data = _load()
+    history = data.get("_trade_log", [])
+    target_index = None
+    for index in range(len(history) - 1, -1, -1):
+        item = history[index]
+        if item.get("symbol") == symbol and item.get("label", "default") == label:
+            target_index = index
+            break
+    if target_index is None:
+        return None
+
+    item = history[target_index]
+    lot = data.setdefault(symbol, {}).setdefault(label, {"cost": 0, "shares": 0})
+
+    # 新紀錄會保存交易前狀態，撤銷時可精準恢復；舊紀錄則使用反向計算相容處理。
+    if "before_cost" in item and "before_shares" in item:
+        lot["cost"] = round(float(item["before_cost"] or 0), 4)
+        lot["shares"] = float(item["before_shares"] or 0)
+    else:
+        current_cost = float(lot.get("cost", 0) or 0)
+        current_shares = float(lot.get("shares", 0) or 0)
+        trade_shares = float(item.get("shares", 0) or 0)
+        trade_price = float(item.get("price", 0) or 0)
+        if item.get("action") == "buy":
+            previous_shares = current_shares - trade_shares
+            if previous_shares < -1e-9:
+                raise ValueError("目前持股資料與交易紀錄不一致，無法安全撤銷")
+            lot["shares"] = max(0.0, previous_shares)
+            lot["cost"] = round(
+                max(0.0, (current_cost * current_shares - trade_price * trade_shares)
+                    / previous_shares) if previous_shares > 1e-9 else 0.0,
+                4,
+            )
+        elif item.get("action") == "sell":
+            lot["shares"] = current_shares + trade_shares
+        else:
+            raise ValueError("未知的交易類型，無法撤銷")
+
+    history.pop(target_index)
+    _save(data)
+    return item
+
+
+def _apply_trade_state(cost, shares, item):
+    trade_shares = float(item.get("shares", 0) or 0)
+    trade_price = float(item.get("price", 0) or 0)
+    if item.get("action") == "buy":
+        new_shares = shares + trade_shares
+        new_cost = ((cost * shares) + (trade_price * trade_shares)) / new_shares if new_shares else 0
+        return new_cost, new_shares
+    if item.get("action") == "sell":
+        new_shares = max(0.0, shares - trade_shares)
+        return (cost if new_shares > 0 else 0.0), new_shares
+    raise ValueError("未知的交易類型，無法撤銷")
+
+
+def _reverse_trade_state(cost, shares, item):
+    trade_shares = float(item.get("shares", 0) or 0)
+    trade_price = float(item.get("price", 0) or 0)
+    if item.get("action") == "buy":
+        previous_shares = shares - trade_shares
+        if previous_shares < -1e-9:
+            raise ValueError("目前持股資料與交易紀錄不一致，無法安全撤銷")
+        previous_cost = (
+            (cost * shares - trade_price * trade_shares) / previous_shares
+            if previous_shares > 1e-9 else 0.0
+        )
+        return max(0.0, previous_cost), max(0.0, previous_shares)
+    if item.get("action") == "sell":
+        # 若舊紀錄剛好賣光，舊格式沒有保存賣出前成本，只能保留現有可知成本。
+        return cost, shares + trade_shares
+    raise ValueError("未知的交易類型，無法撤銷")
+
+
+def undo_trade(trade_index):
+    """撤銷交易歷史中的指定一筆，並重算該股票/倉別後續交易。"""
+    data = _load()
+    history = data.get("_trade_log", [])
+    if not isinstance(trade_index, int) or not 0 <= trade_index < len(history):
+        return None
+
+    target = history[trade_index]
+    symbol = target.get("symbol")
+    label = target.get("label", "default")
+    lot = data.setdefault(symbol, {}).setdefault(label, {"cost": 0, "shares": 0})
+    stream = [
+        item for item in history
+        if item.get("symbol") == symbol and item.get("label", "default") == label
+    ]
+
+    target_before = (target.get("before_cost"), target.get("before_shares"))
+    if target_before[0] is not None and target_before[1] is not None:
+        # 新格式保存了目標交易前狀態，因此只需從那個狀態重播後續交易。
+        cost, shares = float(target_before[0] or 0), float(target_before[1] or 0)
+        replay = stream[stream.index(target) + 1:]
+    else:
+        # 舊格式沒有快照，先由目前持股反向推回最早紀錄，再跳過目標交易重播。
+        cost, shares = float(lot.get("cost", 0) or 0), float(lot.get("shares", 0) or 0)
+        for item in reversed(stream):
+            cost, shares = _reverse_trade_state(cost, shares, item)
+        replay = [item for item in stream if item is not target]
+
+    for item in replay:
+        cost, shares = _apply_trade_state(cost, shares, item)
+
+    lot["cost"], lot["shares"] = round(cost, 4), shares
+    history.pop(trade_index)
+    _save(data)
+    return target
+
+
+def trade_history_records(symbol=None):
+    """回傳交易紀錄及其在原始歷史中的索引，供介面逐筆撤銷。"""
     hist = _load().get("_trade_log", [])
-    return [h for h in hist if symbol is None or h["symbol"] == symbol]
+    fields = ("date", "symbol", "name", "label", "action", "shares", "price", "note")
+    return [
+        {**{field: h.get(field, "") for field in fields}, "_index": index}
+        for index, h in enumerate(hist)
+        if symbol is None or h.get("symbol") == symbol
+    ]
+
+
+def trade_history(symbol=None):
+    return [{key: value for key, value in item.items() if key != "_index"}
+            for item in trade_history_records(symbol)]
 
 
 def all_symbols():
