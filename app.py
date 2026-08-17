@@ -14,7 +14,6 @@ import streamlit as st
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts"))
 
-import levels_watch
 import positions_store
 
 st.set_page_config(page_title="關卡小白", page_icon="🎯", layout="centered")
@@ -36,6 +35,9 @@ def check_password():
 
 if not check_password():
     st.stop()
+
+
+import levels_watch
 
 
 @st.cache_data(ttl=120)
