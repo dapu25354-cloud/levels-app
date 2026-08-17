@@ -175,7 +175,7 @@ def fetch_changes(symbols):
     changes = {s: None for s in symbols}
     try:
         data = yf.download(symbols, period="7d", auto_adjust=False,
-                           progress=False, group_by="ticker")
+                           progress=False, group_by="ticker", timeout=10)
     except Exception:
         return changes
     for s in symbols:

@@ -56,7 +56,13 @@ tab1, tab2, tab3 = st.tabs(["總覽", "單檔深入", "持倉管理"])
 with tab1:
     if st.button("重新整理"):
         _collect.clear()
-    d = _collect()
+        st.session_state["dashboard_loaded"] = True
+    if st.session_state.get("dashboard_loaded"):
+        with st.spinner("抓取行情中，請稍候..."):
+            d = _collect()
+    else:
+        st.info("尚未載入行情；若要查看總覽，請按上方「重新整理」。持股管理可以直接使用。")
+        d = {"flagged": [], "breakout": [], "empty": [], "calm": [], "errors": [], "orders": []}
     flagged, breakout, empty, calm, errors, orders = (
         d["flagged"], d["breakout"], d["empty"], d["calm"], d["errors"], d["orders"])
 
