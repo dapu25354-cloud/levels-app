@@ -133,10 +133,13 @@ with tab3:
         if tshares <= 0 or tprice <= 0:
             st.error("股數/價格要大於 0")
         else:
-            new_cost, new_shares = positions_store.record_trade(
-                symbol, label, action, tshares, tprice, tdate.isoformat(), note, name)
-            st.success(f"已更新：成本 {new_cost}　股數 {new_shares}")
-            _collect.clear()
+            try:
+                new_cost, new_shares = positions_store.record_trade(
+                    symbol, label, action, tshares, tprice, tdate.isoformat(), note, name)
+                st.success(f"已更新：成本 {new_cost}　股數 {new_shares}")
+                _collect.clear()
+            except RuntimeError as exc:
+                st.error(str(exc))
 
     records = positions_store.trade_history_records(symbol)
     if records:
@@ -158,5 +161,5 @@ with tab3:
                         st.success("已撤銷指定交易，成本與股數已重新計算。")
                         _collect.clear()
                         st.rerun()
-                    except ValueError as exc:
+                    except (RuntimeError, ValueError) as exc:
                         st.error(str(exc))

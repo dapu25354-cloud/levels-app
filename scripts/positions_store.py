@@ -3,13 +3,13 @@ positions_store.py — 私密持倉資料層
 ------------------------------------------------------------
 真實成本/股數不寫死在各支 xxx_levels.py 裡，一律從這裡讀。
 
-兩種儲存模式，自動判斷用哪一種：
-  1. 本機模式(預設，不用設定任何東西)：存在同資料夾一個 positions_local.json，
-     已在 .gitignore 排除，不會被 commit、不會外流。這是給「在自己電腦跑、
-     手機連同一個 WiFi 打開」這種最簡單用法的。
-  2. 雲端模式(選用，之後想部署到 Streamlit Cloud 才需要)：設定 GH_TOKEN/GIST_ID
-     後，改存在一個私有 GitHub Gist，本機從環境變數讀，雲端從 st.secrets 讀。
-     即使這個 repo(程式碼/判斷規則)意外外洩，也不會連帶洩漏真實金額。
+資料來源依下列優先順序自動判斷：
+  1. 部署 Secret／環境變數 POSITIONS_JSON：直接放持倉 JSON，適合 Streamlit Cloud。
+     這個來源是唯讀的；要修改內容時，請更新部署平台的 Secret。
+  2. 既有私有 GitHub Gist：設定 GH_TOKEN/GIST_ID 後使用，保留舊部署方式相容性，
+     並支援 App 原本的持倉管理寫入功能。
+  3. 本機模式(預設，不用設定任何東西)：讀同資料夾的 positions_local.json；
+     此檔已在 .gitignore 排除，不會被 commit、不會外流。
 
 找不到資料、或 API 打不通時，一律安全降級成「空手」(cost=0, shares=0)，不會讓整份報表爆掉。
 """
@@ -24,19 +24,26 @@ _CACHE_TTL = 30  # 秒；同一次執行(levels_watch 跑 31 檔)只打一次 AP
 
 FILENAME = "positions.json"
 _LOCAL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "positions_local.json")
+POSITIONS_SECRET = "POSITIONS_JSON"
+
+
+def _setting(name):
+    """讀取環境變數或 Streamlit Secret；空字串視為未設定。"""
+    value = os.environ.get(name)
+    if value:
+        return value
+    try:
+        import streamlit as st
+        value = st.secrets.get(name)
+        if value:
+            return value
+    except Exception:
+        pass
+    return None
 
 
 def _creds():
-    token = os.environ.get("GH_TOKEN")
-    gist_id = os.environ.get("GIST_ID")
-    if not token or not gist_id:
-        try:
-            import streamlit as st
-            token = token or st.secrets.get("GH_TOKEN")
-            gist_id = gist_id or st.secrets.get("GIST_ID")
-        except Exception:
-            pass
-    return token, gist_id
+    return _setting("GH_TOKEN"), _setting("GIST_ID")
 
 
 def _headers(token):
@@ -51,6 +58,14 @@ def _load_local():
         return {}
 
 
+def _load_secret(raw):
+    """解析 POSITIONS_JSON，且只接受 JSON object，避免載入非預期內容。"""
+    data = raw if isinstance(raw, dict) else json.loads(str(raw))
+    if not isinstance(data, dict):
+        raise ValueError("POSITIONS_JSON 必須是 JSON object")
+    return data
+
+
 def _save_local(data):
     with open(_LOCAL_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -60,6 +75,16 @@ def _load(force=False):
     global _CACHE, _CACHE_TS
     if _CACHE is not None and not force and (time.time() - _CACHE_TS) < _CACHE_TTL:
         return _CACHE
+    secret_raw = _setting(POSITIONS_SECRET)
+    if secret_raw is not None:
+        try:
+            _CACHE = _load_secret(secret_raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            # Secret 已設定但格式錯誤時不可退回本機檔，避免部署環境誤顯示本機持倉。
+            _CACHE = {}
+        _CACHE_TS = time.time()
+        return _CACHE
+
     token, gist_id = _creds()
     if not token or not gist_id:
         _CACHE = _load_local()
@@ -78,6 +103,11 @@ def _load(force=False):
 
 def _save(data):
     global _CACHE, _CACHE_TS
+    if _setting(POSITIONS_SECRET) is not None:
+        raise RuntimeError(
+            "目前使用部署 Secret POSITIONS_JSON（唯讀）。請更新部署平台的 Secret，"
+            "再重新整理 App。"
+        )
     token, gist_id = _creds()
     if not token or not gist_id:
         _save_local(data)
