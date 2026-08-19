@@ -112,7 +112,40 @@ with tab2:
         st.text(text)
 
 with tab3:
-    st.write("新增一筆買賣，自動用加權平均重算成本/股數（跟本機 xxx_levels.py 的邏輯一致）。")
+    source = positions_store.storage_info()
+    write_hint = "Gist 優先；POSITIONS_JSON 只在 Gist 讀不到時作備援。" if source["writable"] else (
+        "目前為唯讀；請在部署平台更新 POSITIONS_JSON，或設定 GH_TOKEN/GIST_ID 啟用 Gist。"
+    )
+    st.caption(f"持股資料來源：{source['name']}。{write_hint}")
+
+    status = positions_store.load_status()
+    if status["error"]:
+        st.warning(f"{status['error']}，目前使用：{status['source']}。")
+
+    if st.button("重新讀取持股", key="refresh_positions"):
+        positions_store.clear_cache()
+        st.rerun()
+
+    name_by_symbol = {m.SYMBOL: m.NAME for m in levels_watch.MODS}
+    holding_rows = positions_store.holdings()
+    st.subheader(f"目前持股（{len(holding_rows)} 檔）")
+    if holding_rows:
+        overview = []
+        for row in holding_rows:
+            overview.append({
+                "股票": name_by_symbol.get(row["symbol"], row["symbol"]),
+                "代號": row["symbol"],
+                "倉位": row["label"],
+                "股數": row["shares"],
+                "平均成本": row["cost"],
+                "投入金額": round(row["shares"] * row["cost"], 2),
+            })
+        st.dataframe(overview, hide_index=True, use_container_width=True)
+    else:
+        st.info("目前沒有登記中的持股。")
+
+    st.subheader("新增一筆買賣")
+    st.write("買進會用加權平均重算成本；賣出會扣除股數，賣光後成本歸零。")
     options = {f"{m.NAME}（{m.SYMBOL}）": m for m in levels_watch.MODS}
     choice = st.selectbox("股票", list(options.keys()), key="pos_choice")
     mod = options[choice]
