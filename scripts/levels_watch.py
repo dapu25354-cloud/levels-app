@@ -226,11 +226,15 @@ def collect():
         except Exception as e:
             errors.append((mod.__name__, str(e)))
             continue
+        symbol = getattr(mod, "SYMBOL", None)
         name, verdict, sev, emoji, price = _parse(text)
-        chg = changes.get(getattr(mod, "SYMBOL", None))
-        # 空手等接回的股(標題有「空手」)單獨一類,別跟「抱著持有」的混在一起,
-        # 否則 ⚪ 會被丟進「抱著沒事」=誤導成你還持有(銳澤就這樣矛盾過)。
-        is_empty = '空手' in text
+        chg = changes.get(symbol)
+        # 持股身分必須來自資料層，不可從規則文案猜測；文案可能只描述
+        # 機動倉空手、觀察策略或通用規則，不能因此把整檔誤分成空手。
+        position = positions_store.get_position_summary(symbol)
+        is_empty = not position["is_held"]
+        if not is_empty:
+            verdict = f"持股 {position['shares']:g} 股｜{verdict}"
         if is_empty:
             empty.append((name, verdict, chg))
         elif sev >= 2:

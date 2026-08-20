@@ -67,6 +67,8 @@ with tab1:
         d = {"flagged": [], "breakout": [], "empty": [], "calm": [], "errors": [], "orders": []}
     flagged, breakout, empty, calm, errors, orders = (
         d["flagged"], d["breakout"], d["empty"], d["calm"], d["errors"], d["orders"])
+    held_count = len({row["symbol"] for row in positions_store.holdings()})
+    st.caption(f"持股判斷：{held_count} 檔有 shares；其餘才列入空手觀察。")
 
     def _line(name, verdict, chg):
         tag = levels_watch.day_tag(chg)
@@ -106,6 +108,15 @@ with tab2:
     options = {f"{m.NAME}（{m.SYMBOL}）": m for m in levels_watch.MODS}
     choice = st.selectbox("選股票（31檔）", list(options.keys()), key="detail_choice")
     mod = options[choice]
+    position = positions_store.get_position_summary(mod.SYMBOL)
+    if position["is_held"]:
+        st.success(
+            f"判斷身分：已持股｜合計 {position['shares']:g} 股｜"
+            f"加權平均成本 {position['cost']:g}"
+        )
+        st.caption("以下關卡建議以持股者情境閱讀；核心/機動未拆分時，先以總持股為準。")
+    else:
+        st.info("判斷身分：空手｜沒有任何倉位 shares > 0，以下使用等待進場情境。")
     if st.button("查看關卡判斷"):
         with st.spinner("抓即時資料中..."):
             text = _run_module(mod)
@@ -121,6 +132,13 @@ with tab3:
     status = positions_store.load_status()
     if status["error"]:
         st.warning(f"{status['error']}，目前使用：{status['source']}。")
+        diagnostic = status.get("diagnostic") or {}
+        if diagnostic:
+            detail = diagnostic.get("summary", "未提供細節")
+            available_files = diagnostic.get("available_files")
+            if available_files:
+                detail += "；Gist 檔名：" + "、".join(available_files)
+            st.caption("安全診斷：" + detail)
 
     if st.button("重新讀取持股", key="refresh_positions"):
         positions_store.clear_cache()

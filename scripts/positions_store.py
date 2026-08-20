@@ -35,6 +35,7 @@ _CACHE_TS = 0
 _CACHE_TTL = 30  # 秒；同一次執行(levels_watch 跑 31 檔)只打一次 API，避免每檔各打一次
 _LAST_SOURCE = None
 _LAST_ERROR = None
+_LAST_DIAGNOSTIC = None
 _LOCAL_INVALID = False
 
 FILENAME = "positions.json"
@@ -153,32 +154,119 @@ def _save_local(data):
         json.dump(data, f, ensure_ascii=False, indent=2, allow_nan=False)
 
 
+class _GistLoadError(RuntimeError):
+    """可安全顯示給 UI 的 Gist 讀取錯誤，不攜帶 URL、憑證或資料內容。"""
+
+    def __init__(self, stage, summary, status=None, filename=None, files=None):
+        super().__init__(summary)
+        self.stage = stage
+        self.summary = summary
+        self.status = status
+        self.filename = filename
+        self.files = files
+
+    def diagnostic(self):
+        result = {
+            "kind": "gist",
+            "stage": self.stage,
+            "status": self.status,
+            "summary": self.summary,
+        }
+        if self.filename:
+            result["expected_file"] = self.filename
+        if self.files is not None:
+            result["available_files"] = self.files
+        return result
+
+
+def _gist_http_error(stage, response):
+    """把 HTTP 回應轉成不含 endpoint/Token/Gist ID 的診斷資料。"""
+    status = response.status_code
+    reason = getattr(response, "reason", "") or ""
+    summary = f"GitHub Gist {stage} 回應 HTTP {status}"
+    if reason:
+        summary += f" ({reason})"
+    return _GistLoadError(stage, summary, status=status)
+
+
+def _gist_request_error(stage, exc):
+    return _GistLoadError(
+        stage,
+        f"GitHub Gist {stage} 請求失敗（{type(exc).__name__}）",
+    )
+
+
+def _diagnostic_from_error(exc):
+    if isinstance(exc, _GistLoadError):
+        return exc.diagnostic()
+    if isinstance(exc, requests.RequestException):
+        return {
+            "kind": "gist",
+            "stage": "request",
+            "status": None,
+            "summary": f"GitHub Gist 請求失敗（{type(exc).__name__}）",
+        }
+    return {
+        "kind": "gist",
+        "stage": "parse",
+        "status": None,
+        "summary": f"GitHub Gist 處理失敗（{type(exc).__name__}）",
+    }
+
+
 def _load_gist(token, gist_id):
-    r = requests.get(f"https://api.github.com/gists/{gist_id}", headers=_headers(token), timeout=10)
-    r.raise_for_status()
-    files = r.json().get("files", {})
+    try:
+        r = requests.get(f"https://api.github.com/gists/{gist_id}", headers=_headers(token), timeout=10)
+    except requests.RequestException as exc:
+        raise _gist_request_error("讀取", exc) from exc
+    if not r.ok:
+        raise _gist_http_error("讀取", r)
+    try:
+        body = r.json()
+    except ValueError as exc:
+        raise _GistLoadError("回應 JSON", "GitHub Gist 回應不是有效 JSON") from exc
+    if not isinstance(body, dict):
+        raise _GistLoadError("回應結構", "GitHub Gist 回應頂層不是 JSON object")
+
+    files = body.get("files")
+    if not isinstance(files, dict):
+        raise _GistLoadError("檔案清單", "GitHub Gist 回應缺少有效的 files object")
     file_info = files.get(FILENAME)
     if not isinstance(file_info, dict):
-        raise ValueError(f"Gist 缺少 {FILENAME}")
+        available_files = sorted(str(name) for name in files.keys())[:10]
+        raise _GistLoadError(
+            "檔名比對",
+            f"Gist 找不到預期檔案 {FILENAME}",
+            filename=FILENAME,
+            files=available_files,
+        )
 
     content = file_info.get("content")
     if file_info.get("truncated") and file_info.get("raw_url"):
-        raw = requests.get(file_info["raw_url"], headers=_headers(token), timeout=10)
-        raw.raise_for_status()
+        try:
+            raw = requests.get(file_info["raw_url"], headers=_headers(token), timeout=10)
+        except requests.RequestException as exc:
+            raise _gist_request_error("讀取 raw 檔案", exc) from exc
+        if not raw.ok:
+            raise _gist_http_error("讀取 raw 檔案", raw)
         content = raw.text
     if not isinstance(content, str):
-        raise ValueError(f"Gist 的 {FILENAME} 內容無效")
-    return _load_secret(content)
+        raise _GistLoadError("檔案內容", f"Gist {FILENAME} 沒有有效文字內容", filename=FILENAME)
+    try:
+        return _load_secret(content)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise _GistLoadError("資料驗證", f"Gist {FILENAME} JSON/schema 驗證失敗", filename=FILENAME) from exc
 
 
 def _load(force=False):
-    global _CACHE, _CACHE_TS, _LAST_SOURCE, _LAST_ERROR, _LOCAL_INVALID
+    global _CACHE, _CACHE_TS, _LAST_SOURCE, _LAST_ERROR, _LAST_DIAGNOSTIC, _LOCAL_INVALID
     if _CACHE is not None and not force and (time.time() - _CACHE_TS) < _CACHE_TTL:
         return _CACHE
 
     previous_cache = _CACHE
     _LAST_SOURCE = None
     _LAST_ERROR = None
+    _LAST_DIAGNOSTIC = None
 
     token, gist_id = _creds()
     if token and gist_id:
@@ -187,8 +275,9 @@ def _load(force=False):
             _LAST_SOURCE = "私有 GitHub Gist"
             _CACHE_TS = time.time()
             return _CACHE
-        except Exception:
+        except Exception as exc:
             _LAST_ERROR = "Gist 讀取或解析失敗"
+            _LAST_DIAGNOSTIC = _diagnostic_from_error(exc)
             # 有已驗證過的資料時，保留它；絕不把損壞的回應合併進快取。
             if isinstance(previous_cache, dict):
                 _CACHE = previous_cache
@@ -222,18 +311,19 @@ def _load(force=False):
 
 def clear_cache():
     """清除記憶體快取，供使用者更新部署 Secret 後重新讀取。"""
-    global _CACHE, _CACHE_TS, _LAST_SOURCE, _LAST_ERROR, _LOCAL_INVALID
+    global _CACHE, _CACHE_TS, _LAST_SOURCE, _LAST_ERROR, _LAST_DIAGNOSTIC, _LOCAL_INVALID
     _CACHE = None
     _CACHE_TS = 0
     _LAST_SOURCE = None
     _LAST_ERROR = None
+    _LAST_DIAGNOSTIC = None
     _LOCAL_INVALID = False
 
 
 def load_status():
     """回傳不含憑證的讀取狀態，供 UI/同步流程顯示。"""
     _load()
-    return {"source": _LAST_SOURCE, "error": _LAST_ERROR}
+    return {"source": _LAST_SOURCE, "error": _LAST_ERROR, "diagnostic": copy.deepcopy(_LAST_DIAGNOSTIC)}
 
 
 def _save(data):
@@ -241,13 +331,17 @@ def _save(data):
     _validate_data(data, "準備寫入的持倉資料")
     token, gist_id = _creds()
     if token and gist_id:
-        r = requests.patch(
-            f"https://api.github.com/gists/{gist_id}",
-            headers=_headers(token),
-            json={"files": {FILENAME: {"content": json.dumps(data, ensure_ascii=False, indent=2)}}},
-            timeout=10,
-        )
-        r.raise_for_status()
+        try:
+            r = requests.patch(
+                f"https://api.github.com/gists/{gist_id}",
+                headers=_headers(token),
+                json={"files": {FILENAME: {"content": json.dumps(data, ensure_ascii=False, indent=2)}}},
+                timeout=10,
+            )
+        except requests.RequestException as exc:
+            raise _gist_request_error("寫入", exc) from exc
+        if not r.ok:
+            raise _gist_http_error("寫入", r)
         _CACHE = copy.deepcopy(data)
         _CACHE_TS = time.time()
         return
@@ -293,28 +387,77 @@ def sync_local_to_gist(dry_run=False):
     if not token or not gist_id:
         raise RuntimeError("同步需要 GH_TOKEN 與 GIST_ID；請放在未追蹤的 Secrets 或環境變數中。")
 
-    r = requests.patch(
-        f"https://api.github.com/gists/{gist_id}",
-        headers=_headers(token),
-        json={"files": {FILENAME: {"content": payload}}},
-        timeout=10,
-    )
-    r.raise_for_status()
+    try:
+        r = requests.patch(
+            f"https://api.github.com/gists/{gist_id}",
+            headers=_headers(token),
+            json={"files": {FILENAME: {"content": payload}}},
+            timeout=10,
+        )
+    except requests.RequestException as exc:
+        raise _gist_request_error("寫入", exc) from exc
+    if not r.ok:
+        raise _gist_http_error("寫入", r)
     try:
         response_data = _load_gist(token, gist_id)
     except Exception as exc:
         raise RuntimeError("Gist 已送出更新，但回讀驗證失敗；請先到 Gist 確認後再重試。") from exc
 
-    global _CACHE, _CACHE_TS, _LAST_SOURCE, _LAST_ERROR
+    global _CACHE, _CACHE_TS, _LAST_SOURCE, _LAST_ERROR, _LAST_DIAGNOSTIC
     _CACHE = response_data
     _CACHE_TS = time.time()
     _LAST_SOURCE = "私有 GitHub Gist"
     _LAST_ERROR = None
+    _LAST_DIAGNOSTIC = None
     return {**_summary(response_data), "dry_run": False}
 
 
-def get_lot(symbol, label="default"):
-    """回傳 (cost, shares)；沒登記過就是 (0, 0) = 空手。"""
+def get_position_summary(symbol):
+    """回傳一檔股票所有倉位的合計身分、股數與加權平均成本。
+
+    這是持股判斷的單一來源：只要任一 label 的 shares 合計大於 0，
+    就是持股；沒有資料或合計為 0 才是空手。缺少 core/tactical 分類時，
+    default 也會正常納入。
+    """
+    lots = _load().get(symbol, {})
+    total_shares = 0.0
+    total_value = 0.0
+    active_lots = []
+    if isinstance(lots, dict):
+        for label, lot in lots.items():
+            if not isinstance(lot, dict):
+                continue
+            shares = float(lot.get("shares", 0) or 0)
+            cost = float(lot.get("cost", 0) or 0)
+            if shares <= 0:
+                continue
+            total_shares += shares
+            total_value += cost * shares
+            active_lots.append({
+                "label": str(label),
+                "cost": cost,
+                "shares": shares,
+            })
+    average_cost = total_value / total_shares if total_shares > 0 else 0.0
+    return {
+        "symbol": symbol,
+        "is_held": total_shares > 0,
+        "shares": total_shares,
+        "cost": average_cost,
+        "lots": active_lots,
+    }
+
+
+def is_holding(symbol):
+    """回傳一檔股票是否有任一倉位 shares > 0。"""
+    return get_position_summary(symbol)["is_held"]
+
+
+def get_lot(symbol, label=None):
+    """回傳 (cost, shares)。未指定 label 時合計所有倉位；指定時讀單一倉位。"""
+    if label is None:
+        summary = get_position_summary(symbol)
+        return summary["cost"], summary["shares"]
     lot = _load().get(symbol, {}).get(label, {})
     return float(lot.get("cost", 0) or 0), float(lot.get("shares", 0) or 0)
 
